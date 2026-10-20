@@ -193,6 +193,11 @@
     "source": "Source text",
     "style": "Style",
     "textColor": "Text color",
+    "textDiagnostics": {
+      "belowReadableSize": "The font is below the readable minimum ({{minimum}}px).",
+      "collapsed": "This text box is smaller than its inner margin. Enlarge it to show the text.",
+      "overflow": "The text does not fit this box."
+    },
     "textDirection": "Text direction",
     "translation": "Translation",
     "type": "Type",

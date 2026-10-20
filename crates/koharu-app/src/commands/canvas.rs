@@ -306,7 +306,32 @@ pub(crate) async fn commit_transform(
         project.record_commit(&commit);
         (commit, project.active_page())
     };
-    desktop.synchronize(&commit.snapshot, page, &commit).await?;
+    if let Err(error) = desktop.synchronize(&commit.snapshot, page, &commit).await {
+        // The prepared frame cannot represent the new revision. Roll the edit back so
+        // the project and the canvas keep converging: a stale frame would reject every
+        // later transform against a revision the renderer will never reach.
+        let rollback = {
+            let mut guard = project.project.lock().await;
+            match guard.as_mut() {
+                Some(project) => Some(project.undo().await),
+                None => None,
+            }
+        };
+        match rollback {
+            Some(Ok(rolled_back)) => {
+                if let Err(error) = desktop
+                    .synchronize(&rolled_back.snapshot, page, &rolled_back)
+                    .await
+                {
+                    tracing::error!(%error, "rolled-back transform could not be prepared");
+                }
+                canvas_channel.channel.publish(desktop.canvas_state());
+            }
+            Some(Err(rollback)) => tracing::error!(%rollback, "transform rollback failed"),
+            None => tracing::error!("transform rollback had no open project"),
+        }
+        return Err(error.into());
+    }
     canvas_channel.channel.publish(desktop.canvas_state());
     Ok(Some(commit.revision))
 }

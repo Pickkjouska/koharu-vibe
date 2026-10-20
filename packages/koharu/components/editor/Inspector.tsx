@@ -19,6 +19,7 @@ import {
   Plus,
   RotateCcw,
   Trash2,
+  TriangleAlert,
   Type,
 } from 'lucide-react'
 import { type MouseEvent, useEffect, useId, useMemo, useRef, useState } from 'react'
@@ -192,10 +193,29 @@ function TypeInspector() {
   const writingModeChoice = typography.writing_mode ?? 'Auto'
   const effectiveAlignment =
     typography.alignment ?? (writingMode === 'Vertical' ? 'Start' : 'Center')
+  const textDiagnostics = useKoharuStore((state) => state.textDiagnostics)
+  const diagnostics = current ? textDiagnostics[current.id] : undefined
 
   return (
     <div className='min-w-0 p-2' data-testid='type-inspector' aria-disabled={disabled}>
       <div className='grid min-w-0 gap-1.5'>
+        {diagnostics && diagnostics.length > 0 && (
+          <div data-testid='text-diagnostics' className='grid gap-1'>
+            {diagnostics.map((diagnostic) => (
+              <div
+                key={diagnostic.kind}
+                className='flex items-start gap-1.5 rounded-md bg-destructive/10 px-1.5 py-1 text-[9px] leading-3 text-destructive'
+              >
+                <TriangleAlert className='mt-px size-3 shrink-0' />
+                <span>
+                  {t(`inspector.textDiagnostics.${diagnostic.kind}`, {
+                    minimum: Math.round(diagnostic.minimum_font_size ?? 0),
+                  })}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
         <div className='grid min-w-0 grid-cols-[minmax(0,1fr)_2.5rem] gap-1.5'>
           <InspectorField label={t('inspector.font')}>
             <FontPicker

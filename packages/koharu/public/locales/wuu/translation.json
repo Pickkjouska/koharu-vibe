@@ -193,6 +193,11 @@
     "source": "原文",
     "style": "样式",
     "textColor": "文本颜色",
+    "textDiagnostics": {
+      "belowReadableSize": "字号比可读下限（{{minimum}}px）还要小。",
+      "collapsed": "文字框比内边距还要小，放大仔会显示文字。",
+      "overflow": "文字超出框个范围。"
+    },
     "textDirection": "文本方向",
     "translation": "译文",
     "type": "排版",

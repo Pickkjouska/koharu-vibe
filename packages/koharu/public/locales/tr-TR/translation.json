@@ -193,6 +193,11 @@
     "source": "Kaynak metin",
     "style": "Stil",
     "textColor": "Metin rengi",
+    "textDiagnostics": {
+      "belowReadableSize": "Yazı tipi boyutu okunabilir en düşük değerin ({{minimum}}px) altında.",
+      "collapsed": "Metin kutusu iç boşluğundan küçük; metni görmek için büyütün.",
+      "overflow": "Metin bu kutuya sığmıyor."
+    },
     "textDirection": "Metin yönü",
     "translation": "Çeviri",
     "type": "Tipografi",

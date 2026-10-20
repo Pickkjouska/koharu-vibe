@@ -14,6 +14,7 @@ import type {
   StartupState,
   ModelResources,
   PageSize,
+  TextDiagnostic,
 } from '@koharu/bridge/protocol'
 import { toast } from '@koharu/ui/components/toast'
 
@@ -53,6 +54,7 @@ interface KoharuStore {
   canvasSize: [number, number]
   fitCanvasRequest: number
   layerFrames: Record<EntityId, Frame>
+  textDiagnostics: Record<EntityId, TextDiagnostic[]>
   selectedLayers: EntityId[]
   selectedPages: EntityId[]
   tool: CanvasTool
@@ -101,6 +103,7 @@ export const useKoharuStore = create<KoharuStore>()((set) => ({
   canvasSize: [0, 0],
   fitCanvasRequest: 0,
   layerFrames: {},
+  textDiagnostics: {},
   selectedLayers: [],
   selectedPages: [],
   tool: 'select',
@@ -180,6 +183,12 @@ export function receiveError(message: string): void {
 }
 
 function canvasSnapshot(canvas: CanvasState) {
+  const textDiagnostics: Record<EntityId, TextDiagnostic[]> = {}
+  for (const diagnostic of canvas.text_diagnostics) {
+    const existing = textDiagnostics[diagnostic.layer]
+    if (existing) existing.push(diagnostic)
+    else textDiagnostics[diagnostic.layer] = [diagnostic]
+  }
   return {
     canvasPage: canvas.page,
     canvasRevision: canvas.revision,
@@ -188,6 +197,7 @@ function canvasSnapshot(canvas: CanvasState) {
     layerFrames: Object.fromEntries(
       canvas.element_frames.map(({ element, frame }) => [element, frame]),
     ),
+    textDiagnostics,
   }
 }
 

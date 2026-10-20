@@ -4,7 +4,7 @@ use std::{collections::HashSet, future::Future, sync::Arc};
 
 use anyhow::{Context as _, Result, bail};
 use koharu_rasterizer::{Rasterizer, ResourceId};
-use koharu_renderer::{Frame as RenderedFrame, LayerKind, Renderer};
+use koharu_renderer::{Frame as RenderedFrame, LayerKind, RenderDiagnostic, Renderer};
 use koharu_scene::{Commit, EntityId, Geometry, Point, Revision, Snapshot};
 use parking_lot::{Mutex as SyncMutex, RwLock};
 use serde::{Deserialize, Serialize};
@@ -44,6 +44,27 @@ pub struct CanvasState {
     pub generation: u64,
     pub size: [u32; 2],
     pub element_frames: Vec<TransformFrame>,
+    pub text_diagnostics: Vec<TextDiagnostic>,
+}
+
+/// Text problems the renderer detected for one layer on the presented page.
+///
+/// The editor shows these so a layer that cannot be laid out stops looking like a
+/// silent deletion.
+#[derive(Clone, Debug, PartialEq, Serialize, Type)]
+pub struct TextDiagnostic {
+    pub layer: EntityId,
+    pub kind: TextDiagnosticKind,
+    pub font_size: Option<f32>,
+    pub minimum_font_size: Option<f32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub enum TextDiagnosticKind {
+    Collapsed,
+    Overflow,
+    BelowReadableSize,
 }
 
 #[derive(Default)]
@@ -195,6 +216,7 @@ impl Desktop {
                 generation: presentation.generation,
                 size: [0, 0],
                 element_frames: Vec::new(),
+                text_diagnostics: Vec::new(),
             };
         };
         let (width, height) = frame.size();
@@ -226,6 +248,7 @@ impl Desktop {
             generation: presentation.generation,
             size: [width, height],
             element_frames,
+            text_diagnostics: text_diagnostics(frame),
         }
     }
 
@@ -506,6 +529,48 @@ impl PageFrameCache {
     fn clear(&mut self) {
         self.entries.clear();
     }
+}
+
+fn text_diagnostics(frame: &RenderedFrame) -> Vec<TextDiagnostic> {
+    let mut collapsed = HashSet::new();
+    for diagnostic in frame.diagnostics() {
+        if let RenderDiagnostic::TextFrameCollapsed { entity, .. } = diagnostic {
+            collapsed.insert(*entity);
+        }
+    }
+    frame
+        .diagnostics()
+        .iter()
+        .filter_map(|diagnostic| match diagnostic {
+            RenderDiagnostic::TextFrameCollapsed { entity, .. } => Some(TextDiagnostic {
+                layer: *entity,
+                kind: TextDiagnosticKind::Collapsed,
+                font_size: None,
+                minimum_font_size: None,
+            }),
+            // A collapsed frame already explains the overflow; reporting both only
+            // repeats the same visible problem.
+            RenderDiagnostic::TextOverflow { entity, .. } if !collapsed.contains(entity) => {
+                Some(TextDiagnostic {
+                    layer: *entity,
+                    kind: TextDiagnosticKind::Overflow,
+                    font_size: None,
+                    minimum_font_size: None,
+                })
+            }
+            RenderDiagnostic::TextBelowReadableSize {
+                entity,
+                font_size,
+                minimum_font_size,
+            } => Some(TextDiagnostic {
+                layer: *entity,
+                kind: TextDiagnosticKind::BelowReadableSize,
+                font_size: Some(*font_size),
+                minimum_font_size: Some(*minimum_font_size),
+            }),
+            _ => None,
+        })
+        .collect()
 }
 
 fn frame_transform(original: Frame, preview: Frame) -> [f64; 6] {
