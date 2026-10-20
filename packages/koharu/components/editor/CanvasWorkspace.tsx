@@ -196,11 +196,23 @@ export function CanvasWorkspace() {
     }
     commitPending.current = true
     void enqueue(() => call(commands.commitTransform, revision, elements))
-      .then((revision) => (revision === null ? undefined : refresh(projectKey, pagesKey, pageKey)))
-      .catch(() => canvas?.cancelTransform())
+      .then((next) => {
+        if (next !== null) {
+          void refresh(projectKey, pagesKey, pageKey)
+          return
+        }
+        setPreviews({})
+      })
+      .catch((error) => {
+        // The scene was not touched, but the overlay must not keep showing the
+        // abandoned preview: revert it and say why instead of swallowing the error.
+        canvas?.cancelTransform()
+        setPreviews({})
+        receiveError(errorMessage(error))
+        void refresh(projectKey, pagesKey, pageKey)
+      })
       .finally(() => {
         commitPending.current = false
-        setPreviews({})
       })
   }, [canvas, enqueue, transformUpdates])
 

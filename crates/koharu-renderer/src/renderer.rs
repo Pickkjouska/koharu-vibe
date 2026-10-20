@@ -1170,6 +1170,7 @@ fn build_node(
                 text: Some(LocalTextMetadata {
                     rendered_bounds: rendered.metadata.rendered_bounds,
                     layout_bounds: rendered.metadata.layout_bounds,
+                    control_bounds: rendered.metadata.control_bounds,
                     post_script_fonts: rendered.metadata.post_script_fonts,
                     font_size: rendered.metadata.font_size,
                     color: rendered.metadata.color,
@@ -1208,6 +1209,7 @@ fn assemble_frame(
                     language,
                     rendered_bounds: transform_bounds(metadata.rendered_bounds, placement),
                     layout_bounds: transform_bounds(metadata.layout_bounds, placement),
+                    control_bounds: transform_bounds(metadata.control_bounds, placement),
                     post_script_fonts: metadata.post_script_fonts.clone(),
                     font_size: metadata.font_size,
                     color: metadata.color,
@@ -2137,6 +2139,7 @@ mod tests {
             let mut expected = before.clone();
             expected.rendered_bounds.x += 1.0;
             expected.layout_bounds.x += 1.0;
+            expected.control_bounds.x += 1.0;
             assert_eq!(*after, expected, "dragging must only translate the text");
             assert_eq!(
                 frame.layer(layers[1]).unwrap().kind(),

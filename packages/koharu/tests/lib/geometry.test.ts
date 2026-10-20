@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { resizeFrame, rotateFrame } from '@/lib/geometry'
+import { minimumTextFrameSize, resizeFrame, rotateFrame } from '@/lib/geometry'
 import type { Frame } from '@koharu/bridge/protocol'
 
 const frame: Frame = { x: 10, y: 20, width: 100, height: 50, angle_degrees: 0 }
@@ -26,6 +26,20 @@ describe('selection control geometry', () => {
     expect(result.y).toBeCloseTo(35)
     expect(result.width).toBeCloseTo(130)
     expect(result.height).toBe(50)
+  })
+
+  it('never shrinks a text frame below the layout inset floor', () => {
+    // Dragging an edge past the opposite one used to rely on the sub-pixel clamp.
+    // Text frames need the renderer's 4px inset per side to keep a layout area.
+    expect(resizeFrame(frame, 'e', { x: 0, y: 45 }, minimumTextFrameSize).width).toBe(
+      minimumTextFrameSize,
+    )
+    expect(resizeFrame(frame, 'w', { x: 400, y: 45 }, minimumTextFrameSize).width).toBe(
+      minimumTextFrameSize,
+    )
+    expect(resizeFrame(frame, 's', { x: 60, y: 0 }, minimumTextFrameSize).height).toBe(
+      minimumTextFrameSize,
+    )
   })
 
   it('rotates around the frame center', () => {

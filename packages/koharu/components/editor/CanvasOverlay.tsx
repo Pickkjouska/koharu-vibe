@@ -4,7 +4,7 @@ import { useMemo, useRef } from 'react'
 
 import { SelectionControls } from '@/components/editor/SelectionControls'
 import { effectiveLayerVisibility, expandLayerSelection, isTextLayer } from '@/lib/document'
-import { controlFrame, cssFrame, selectableLayer, type Camera } from '@/lib/geometry'
+import { controlFrame, cssFrame, minimumTextFrameSize, selectableLayer, type Camera } from '@/lib/geometry'
 import { useKoharuStore } from '@/lib/store'
 import type {
   EntityId,
@@ -75,6 +75,9 @@ export function CanvasOverlay({
     ? undefined
     : layers.find(({ layer }) => selectedIds.has(layer.id) && selectableLayer(layer))
   const scale = camera.zoom / window.devicePixelRatio
+  // Text frames also have to clear the renderer's 4px inset per side, otherwise the
+  // layer loses its layout area when the user shrinks it.
+  const minimumSize = selectedTextLayer ? minimumTextFrameSize : 1 / scale
 
   return (
     <div
@@ -133,6 +136,7 @@ export function CanvasOverlay({
           frame={selectionControl.frame}
           camera={camera}
           edgesOnly={Boolean(selectedTextLayer)}
+          minimumSize={minimumSize}
           onTransformStart={onTransformStart}
           onTransformFrame={onTransformFrame}
           onTransformEnd={onTransformEnd}
