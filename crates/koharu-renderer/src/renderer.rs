@@ -1170,6 +1170,7 @@ fn build_node(
                 text: Some(LocalTextMetadata {
                     rendered_bounds: rendered.metadata.rendered_bounds,
                     layout_bounds: rendered.metadata.layout_bounds,
+                    control_bounds: rendered.metadata.control_bounds,
                     post_script_fonts: rendered.metadata.post_script_fonts,
                     font_size: rendered.metadata.font_size,
                     color: rendered.metadata.color,
@@ -1203,11 +1204,26 @@ fn assemble_frame(
                     .text
                     .as_ref()
                     .expect("text descriptor must build text metadata");
+                // Control dimensions stay in the text's axes. Rotating their
+                // bounding rectangle into an AABB and attaching the angle again
+                // enlarges the handles on every committed rotation.
+                let control = metadata.control_bounds;
+                let center = placement
+                    * vello::kurbo::Point::new(
+                        f64::from(control.x + control.width * 0.5),
+                        f64::from(control.y + control.height * 0.5),
+                    );
                 LayerKind::Text(TextMetadata {
                     text,
                     language,
                     rendered_bounds: transform_bounds(metadata.rendered_bounds, placement),
                     layout_bounds: transform_bounds(metadata.layout_bounds, placement),
+                    control_bounds: RenderBounds {
+                        x: center.x as f32 - control.width * 0.5,
+                        y: center.y as f32 - control.height * 0.5,
+                        width: control.width,
+                        height: control.height,
+                    },
                     post_script_fonts: metadata.post_script_fonts.clone(),
                     font_size: metadata.font_size,
                     color: metadata.color,
@@ -2005,6 +2021,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn point_and_paragraph_controls_keep_their_text_axes() {
+        let mut session = Session::memory().await.unwrap();
+        let mut ids = Vec::new();
+        let mut edit = session.snapshot().edit();
+        let page = edit
+            .add_page(PageDraft::new("controls", 400.0, 300.0), At::End)
+            .unwrap();
+        for (kind, y) in [
+            (TextLayoutKind::Point, 20.0),
+            (TextLayoutKind::Paragraph, 140.0),
+        ] {
+            let content = edit.add_text_content(page, At::End).unwrap();
+            edit.set(
+                content,
+                &SourceText {
+                    text: Authored::user("source".to_owned()),
+                    language: None,
+                },
+            )
+            .unwrap();
+            edit.set(
+                content,
+                &Translation {
+                    text: Authored::user("Hi".to_owned()),
+                    language: None,
+                },
+            )
+            .unwrap();
+            let layer = edit
+                .add_text_layer(
+                    page,
+                    At::End,
+                    content,
+                    &SceneTextLayout {
+                        origin: Origin::User,
+                        kind,
+                        angle_degrees: Some(30.0),
+                    },
+                )
+                .unwrap();
+            let transform = Affine::translate((100.0, y + 40.0))
+                * Affine::rotate(30.0_f64.to_radians())
+                * Affine::translate((-100.0, -y - 40.0));
+            let mut geometry = Geometry::rectangle(20.0, y, 160.0, 80.0);
+            for point in &mut geometry.points {
+                let transformed = transform * vello::kurbo::Point::new(point.x, point.y);
+                point.x = transformed.x;
+                point.y = transformed.y;
+            }
+            edit.set(layer, &geometry).unwrap();
+            ids.push(layer);
+        }
+        let snapshot = session
+            .commit(edit.finish().unwrap())
+            .await
+            .unwrap()
+            .snapshot;
+        let font = crate::fonts::FontSystem::new().first_font().unwrap();
+        let renderer = Renderer::with_typesetting(TypesettingConfig {
+            font_families: vec![font.family_name().to_owned()],
+        });
+        let frame = renderer.render(&snapshot, page).await.unwrap();
+        let point = frame.layer(ids[0]).unwrap().element_frame().unwrap();
+        let paragraph = frame.layer(ids[1]).unwrap().element_frame().unwrap();
+        assert!(
+            point.width < 80.0,
+            "point text controls must follow its short glyph run"
+        );
+        assert!(point.height < 80.0);
+        assert_eq!(point.angle_degrees, 30.0);
+        assert!((paragraph.x - 20.0).abs() < 1e-4);
+        assert!((paragraph.y - 140.0).abs() < 1e-4);
+        assert!((paragraph.width - 160.0).abs() < 1e-4);
+        assert!((paragraph.height - 80.0).abs() < 1e-4);
+        assert_eq!(paragraph.angle_degrees, 30.0);
+    }
+
+    #[tokio::test]
     async fn joined_balloon_flows_preserve_layout_when_transformed() {
         let mut session = Session::memory().await.unwrap();
         let mut ids = None;
@@ -2137,6 +2231,7 @@ mod tests {
             let mut expected = before.clone();
             expected.rendered_bounds.x += 1.0;
             expected.layout_bounds.x += 1.0;
+            expected.control_bounds.x += 1.0;
             assert_eq!(*after, expected, "dragging must only translate the text");
             assert_eq!(
                 frame.layer(layers[1]).unwrap().kind(),
@@ -2147,6 +2242,18 @@ mod tests {
 
         // Resizing and rotating custom geometry keep the other flow untouched.
         let mut snapshot = moved.snapshot;
+        let mut previous = updated;
+        let sibling_id = koharu_rasterizer::LayerId::from_bytes(*layers[1].as_uuid().as_bytes());
+        let sibling_bytes = serde_json::to_vec(
+            original
+                .prepared()
+                .frame
+                .layers
+                .iter()
+                .find(|layer| layer.id == sibling_id)
+                .unwrap(),
+        )
+        .unwrap();
         for (scale, angle) in [(1.0, 90.0_f32), (1.5, 30.0)] {
             let transform = Affine::translate((80.0, 50.0))
                 * Affine::rotate(f64::from(angle).to_radians())
@@ -2166,7 +2273,8 @@ mod tests {
                     edit.set(layers[0], &layout)
                 })
                 .unwrap();
-            snapshot = session.commit(patch).await.unwrap().snapshot;
+            let commit = session.commit(patch).await.unwrap();
+            snapshot = commit.snapshot;
             let transformed = renderer.compile(&snapshot, page).unwrap();
             for (index, entity) in layers.iter().enumerate() {
                 let before = compiled
@@ -2194,6 +2302,45 @@ mod tests {
                 );
                 assert_eq!(after.frame.angle_degrees, angle);
             }
+            let incremental = renderer
+                .update(&previous, &snapshot, &commit.changes)
+                .await
+                .unwrap();
+            let fresh = renderer.render(&snapshot, page).await.unwrap();
+            for rendered in [&incremental, &fresh] {
+                let control = rendered.layer(layers[0]).unwrap().element_frame().unwrap();
+                let authored = transformed
+                    .layers
+                    .iter()
+                    .find(|layer| layer.entity == layers[0])
+                    .unwrap()
+                    .frame;
+                assert!(
+                    (control.width - authored.bounds.width).abs() < 1e-4,
+                    "rotation must preserve the authored control width: {control:?} vs {authored:?}"
+                );
+                assert!((control.height - authored.bounds.height).abs() < 1e-4);
+                assert!((control.x - authored.bounds.x).abs() < 1e-4);
+                assert!((control.y - authored.bounds.y).abs() < 1e-4);
+                assert_eq!(control.angle_degrees, angle);
+                assert_eq!(
+                    rendered.layer(layers[1]).unwrap().kind(),
+                    original.layer(layers[1]).unwrap().kind()
+                );
+                let sibling = rendered
+                    .prepared()
+                    .frame
+                    .layers
+                    .iter()
+                    .find(|layer| layer.id == sibling_id)
+                    .unwrap();
+                assert_eq!(serde_json::to_vec(sibling).unwrap(), sibling_bytes);
+            }
+            assert_eq!(
+                incremental.prepared().manifest().unwrap().encode().unwrap(),
+                fresh.prepared().manifest().unwrap().encode().unwrap()
+            );
+            previous = incremental;
         }
 
         let mut layout = snapshot.text_layer(layers[0]).unwrap().layout().unwrap();

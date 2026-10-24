@@ -18,6 +18,7 @@ interface SelectionControlsProps {
   frame: Frame
   camera: Camera
   edgesOnly: boolean
+  minimumSize: number
   onTransformStart: (elements: TransformFrame[]) => void
   onTransformFrame: (elements: TransformFrame[]) => void
   onTransformEnd: () => void
@@ -49,6 +50,7 @@ export function SelectionControls({
   frame,
   camera,
   edgesOnly,
+  minimumSize,
   onTransformStart,
   onTransformFrame,
   onTransformEnd,
@@ -92,12 +94,7 @@ export function SelectionControls({
     if (!point) return
     const next =
       current.kind === 'resize'
-        ? resizeFrame(
-            current.original,
-            current.handle,
-            point,
-            window.devicePixelRatio / camera.zoom,
-          )
+        ? resizeFrame(current.original, current.handle, point, minimumSize)
         : rotateFrame(current.original, current.start, point)
     onTransformFrame([{ element, frame: next }])
   }

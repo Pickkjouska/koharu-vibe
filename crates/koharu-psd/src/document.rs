@@ -395,6 +395,12 @@ mod tests {
                 width: 100.0,
                 height: 40.0,
             },
+            control_bounds: RenderBounds {
+                x: 10.0,
+                y: 20.0,
+                width: 100.0,
+                height: 40.0,
+            },
             post_script_fonts: fonts.iter().map(|font| (*font).to_owned()).collect(),
             font_size: 24.0,
             color: [1, 2, 3, 255],

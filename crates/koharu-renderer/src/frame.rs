@@ -372,6 +372,9 @@ pub struct TextMetadata {
     pub language: Option<LanguageTag>,
     pub rendered_bounds: RenderBounds,
     pub layout_bounds: RenderBounds,
+    /// The authored frame the editor transforms. Distinct from `rendered_bounds`
+    /// whenever the ink does not fill the box exactly.
+    pub control_bounds: RenderBounds,
     pub post_script_fonts: Vec<String>,
     pub font_size: f32,
     pub color: [u8; 4],
@@ -416,6 +419,12 @@ pub enum RenderDiagnostic {
         entity: EntityId,
         font_size: f32,
         minimum_font_size: f32,
+    },
+    /// The authored frame is smaller than the text inset, so the text has no layout
+    /// area. The layer renders empty until the frame is enlarged.
+    TextFrameCollapsed {
+        entity: EntityId,
+        available: RenderBounds,
     },
 }
 
@@ -466,6 +475,7 @@ pub(crate) struct RetainedNode {
 pub(crate) struct LocalTextMetadata {
     pub(crate) rendered_bounds: RenderBounds,
     pub(crate) layout_bounds: RenderBounds,
+    pub(crate) control_bounds: RenderBounds,
     pub(crate) post_script_fonts: Vec<String>,
     pub(crate) font_size: f32,
     pub(crate) color: [u8; 4],
@@ -603,7 +613,10 @@ fn element_frame(layer: &Layer) -> Option<PreparedElementFrame> {
     let LayerKind::Text(text) = layer.kind() else {
         return None;
     };
-    let bounds = text.rendered_bounds;
+    // The editor manipulates the authored frame, never the ink extent. Publishing the
+    // rendered bounds here made every transform scale the layout box by the ratio
+    // between the ink and the box, so the selection jumped on every drop.
+    let bounds = text.control_bounds;
     if bounds.width > 0.0 && bounds.height > 0.0 {
         return Some(PreparedElementFrame {
             x: bounds.x,

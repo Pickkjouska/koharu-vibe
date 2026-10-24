@@ -1575,13 +1575,15 @@ fn comic_line_breaks(
     .min(COMIC_MAX_LINES)
     .min(segments.len());
     if maximum_lines == 0 {
-        let mut fallback = line_breaks_with_policy(
+        return comic_overflow_lines(
             segments,
-            balloon.inline_extent(writing_mode, air_x, air_y),
+            balloon,
+            writing_mode,
+            line_height,
+            line_ink,
+            (air_x, air_y),
             policy,
         );
-        fallback.overflowed = true;
-        return fallback;
     }
 
     let select = |allow_hyphenation: bool| {
@@ -1619,14 +1621,56 @@ fn comic_line_breaks(
     }
 
     select(policy != HyphenationPolicy::Disabled).unwrap_or_else(|| {
-        let mut fallback = line_breaks_with_policy(
+        comic_overflow_lines(
             segments,
-            balloon.inline_extent(writing_mode, air_x, air_y),
+            balloon,
+            writing_mode,
+            line_height,
+            line_ink,
+            (air_x, air_y),
             policy,
-        );
-        fallback.overflowed = true;
-        fallback
+        )
     })
+}
+
+/// Line breaks for balloon text that no candidate contour profile can hold.
+///
+/// `line_breaks_with_policy` reports break points whose profiles all share block
+/// position zero, which is correct for a stacked paragraph but wrong for balloon
+/// text: every line would be drawn on top of the previous one. Rebuild the
+/// profiles so each line keeps its own block position and the text spills out of
+/// the balloon instead of collapsing into a single line.
+fn comic_overflow_lines(
+    segments: &[LineBreakMeasure],
+    balloon: &ComicBalloon,
+    writing_mode: WritingMode,
+    line_height: f32,
+    line_ink: InkBand,
+    air: (f32, f32),
+    policy: HyphenationPolicy,
+) -> LineBreakResult {
+    let (air_x, air_y) = air;
+    let mut overflow = line_breaks_with_policy(
+        segments,
+        balloon.inline_extent(writing_mode, air_x, air_y),
+        policy,
+    );
+    let block_air = if writing_mode.is_vertical() {
+        air_x
+    } else {
+        air_y
+    };
+    let line_count = overflow.profiles.len();
+    for (line, profile) in overflow.profiles.iter_mut().enumerate() {
+        let block_index = if writing_mode == WritingMode::VerticalRl {
+            line_count - line - 1
+        } else {
+            line
+        };
+        profile.block_baseline = block_air + line_ink.before + block_index as f32 * line_height;
+    }
+    overflow.overflowed = true;
+    overflow
 }
 
 fn exact_profiled_line_breaks(
@@ -2851,6 +2895,45 @@ mod tests {
             line_breaks_with_policy(&needs_hyphen, 70.0, HyphenationPolicy::LastResort);
         assert_eq!(hyphenated.breaks, [1, 2]);
         assert!(!hyphenated.overflowed);
+    }
+
+    #[test]
+    fn comic_overflow_keeps_forced_lines_on_separate_baselines() -> anyhow::Result<()> {
+        let font = any_system_font();
+        let text = (0..10)
+            .map(|index| format!("line {index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        // Ten forced lines cannot fit a 60px balloon at any size. The fallback must
+        // still place every line on its own baseline instead of stacking them all on
+        // block position zero.
+        let layout = TextLayout::new(&font)
+            .with_max_font_size(24.0)
+            .with_min_font_size(9.0)
+            .with_line_height(1.2)
+            .with_alignment(TextAlign::Center)
+            .with_max_width(60.0)
+            .with_max_height(60.0)
+            .with_comic_balloon(
+                60.0,
+                60.0,
+                vec![(0.0, 0.0), (60.0, 0.0), (60.0, 60.0), (0.0, 60.0)],
+                4.0,
+            )
+            .run(&text)?;
+
+        assert!(layout.overflowed());
+        assert!(layout.lines.len() >= 10);
+        let baselines = layout
+            .lines
+            .iter()
+            .map(|line| line.baseline.1)
+            .collect::<Vec<_>>();
+        assert!(
+            baselines.windows(2).all(|pair| pair[1] > pair[0]),
+            "lines must keep distinct baselines: {baselines:?}"
+        );
+        Ok(())
     }
 
     #[test]

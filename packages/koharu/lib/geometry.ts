@@ -4,6 +4,13 @@ import { effectiveLayerVisibility, isTextLayer } from './document'
 
 const minimumFrameSize = 1e-6
 
+/**
+ * Lowest page-space size a text frame may be dragged to. The renderer insets text
+ * by 4px per side, so a frame below 8px has no layout area at all; keep a little
+ * more than that so the content box stays usable.
+ */
+export const minimumTextFrameSize = 12
+
 export interface Camera {
   zoom: number
   translation: [number, number]

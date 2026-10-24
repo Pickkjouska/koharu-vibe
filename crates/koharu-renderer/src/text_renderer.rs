@@ -54,6 +54,9 @@ pub(crate) struct RenderedTextNode {
 pub(crate) struct RenderedTextMetadata {
     pub(crate) rendered_bounds: RenderBounds,
     pub(crate) layout_bounds: RenderBounds,
+    /// The authored frame the text was fitted into. This is the box the editor
+    /// transforms; `rendered_bounds` is only the ink that happened to fit in it.
+    pub(crate) control_bounds: RenderBounds,
     pub(crate) post_script_fonts: Vec<String>,
     pub(crate) font_size: f32,
     pub(crate) color: [u8; 4],
@@ -157,17 +160,24 @@ impl TextRenderer {
             width: descriptor.width,
             height: descriptor.height,
         };
-        let bounds = if is_bubble_text {
+        if frame.width <= 0.0 || frame.height <= 0.0 {
+            return Ok(collapsed_text_node(descriptor, frame));
+        }
+        let inset_bounds = if is_bubble_text {
             inset(frame, descriptor.text_inset)
         } else {
             frame
         };
-        if bounds.width <= 0.0 || bounds.height <= 0.0 {
-            return Err(Error::invalid(format!(
-                "text inset leaves no layout area for entity {}",
-                descriptor.entity
-            )));
-        }
+        // A frame at or below the inset margin cannot hold a line. Failing the whole
+        // page render for one degenerate layer made the text look deleted and left the
+        // canvas stuck on a stale revision, so lay the text out against the un-inset
+        // frame instead: it overflows, stays visible, and stays editable.
+        let collapsed_frame = inset_bounds.width <= 0.0 || inset_bounds.height <= 0.0;
+        let (bounds, is_bubble_text) = if collapsed_frame {
+            (frame, false)
+        } else {
+            (inset_bounds, is_bubble_text)
+        };
         let fonts = fonts
             .resolve(
                 descriptor.preferred_font.as_deref(),
@@ -209,7 +219,7 @@ impl TextRenderer {
                 .with_max_width(bounds.width)
                 .with_max_height(bounds.height);
         }
-        if let Some(contour) = &descriptor.balloon_contour {
+        if !collapsed_frame && let Some(contour) = &descriptor.balloon_contour {
             let [top, _, _, left] = descriptor.text_inset;
             let contour = contour.iter().map(|&(x, y)| (x - left, y - top)).collect();
             layout = layout.with_comic_balloon(
@@ -266,6 +276,12 @@ impl TextRenderer {
             transform,
         );
         let mut diagnostics = Vec::new();
+        if collapsed_frame {
+            diagnostics.push(RenderDiagnostic::TextFrameCollapsed {
+                entity: descriptor.entity,
+                available: inset_bounds.into(),
+            });
+        }
         if layout.font_size + f32::EPSILON < descriptor.minimum_font_size {
             diagnostics.push(RenderDiagnostic::TextBelowReadableSize {
                 entity: descriptor.entity,
@@ -307,6 +323,11 @@ impl TextRenderer {
                 } else {
                     bounds.into()
                 },
+                control_bounds: if descriptor.point_text {
+                    rendered_bounds
+                } else {
+                    frame.into()
+                },
                 post_script_fonts: fonts
                     .iter()
                     .map(|font| font.post_script_name().to_owned())
@@ -316,6 +337,34 @@ impl TextRenderer {
             },
             diagnostics,
         })
+    }
+}
+
+/// A text layer whose authored frame has no area. It renders nothing but keeps the
+/// rest of the page alive and reports why it is empty.
+fn collapsed_text_node(descriptor: &TextNodeDescriptor, frame: LayoutBox) -> RenderedTextNode {
+    let empty = RenderBounds {
+        x: frame.x,
+        y: frame.y,
+        width: 0.0,
+        height: 0.0,
+    };
+    RenderedTextNode {
+        scene: Arc::new(PreparedScene::default()),
+        resources: Arc::from([]),
+        local_bounds: empty,
+        metadata: RenderedTextMetadata {
+            rendered_bounds: empty,
+            layout_bounds: frame.into(),
+            control_bounds: frame.into(),
+            post_script_fonts: Vec::new(),
+            font_size: 0.0,
+            color: descriptor.foreground_color,
+        },
+        diagnostics: vec![RenderDiagnostic::TextFrameCollapsed {
+            entity: descriptor.entity,
+            available: frame.into(),
+        }],
     }
 }
 
@@ -479,6 +528,95 @@ mod tests {
 
         assert_eq!(automatic_maximum(&descriptor, bounds, false), 24.0);
         assert_eq!(automatic_maximum(&descriptor, bounds, true), 240.0);
+    }
+
+    #[tokio::test]
+    async fn frame_below_the_inset_margin_still_renders() {
+        let font = crate::fonts::FontSystem::new().first_font().unwrap();
+        let family = font.family_name().to_owned();
+        let fonts = Fonts::new();
+        fonts
+            .prepare(&[crate::fonts::FontRequest {
+                family: family.clone(),
+                weight: None,
+                style: None,
+            }])
+            .await
+            .unwrap();
+        let descriptor = TextNodeDescriptor {
+            entity: EntityId::new(),
+            text: "Hi".to_owned(),
+            language: None,
+            width: 6.0,
+            height: 40.0,
+            balloon_contour: Some(vec![(0.0, 0.0), (6.0, 0.0), (6.0, 40.0), (0.0, 40.0)]),
+            preferred_font: Some(family.clone()),
+            font_families: vec![family],
+            font_weight: None,
+            font_style: None,
+            font_size: None,
+            minimum_font_size: 9.0,
+            auto_fit: true,
+            alignment: TextAlign::Center,
+            writing_mode: WritingMode::Horizontal,
+            foreground_color: [0, 0, 0, 255],
+            stroke: None,
+            line_height: 1.2,
+            letter_spacing: 0.0,
+            word_spacing: 0.0,
+            text_inset: [4.0; 4],
+            point_text: false,
+        };
+
+        let node = TextRenderer::new()
+            .render_descriptor(&descriptor, &fonts)
+            .unwrap();
+
+        assert!(
+            node.diagnostics.iter().any(|diagnostic| matches!(
+                diagnostic,
+                RenderDiagnostic::TextFrameCollapsed { .. }
+            ))
+        );
+        assert!(node.local_bounds.width > 0.0);
+    }
+
+    #[test]
+    fn collapsed_frame_reports_a_diagnostic_without_failing() {
+        let descriptor = TextNodeDescriptor {
+            entity: EntityId::new(),
+            text: "Hi".to_owned(),
+            language: None,
+            width: 0.0,
+            height: 40.0,
+            balloon_contour: None,
+            preferred_font: Some("Arial".to_owned()),
+            font_families: vec!["Arial".to_owned()],
+            font_weight: None,
+            font_style: None,
+            font_size: Some(12.0),
+            minimum_font_size: 9.0,
+            auto_fit: true,
+            alignment: TextAlign::Center,
+            writing_mode: WritingMode::Horizontal,
+            foreground_color: [0, 0, 0, 255],
+            stroke: None,
+            line_height: 1.2,
+            letter_spacing: 0.0,
+            word_spacing: 0.0,
+            text_inset: [4.0; 4],
+            point_text: false,
+        };
+
+        let node = TextRenderer::new()
+            .render_descriptor(&descriptor, &Fonts::new())
+            .unwrap();
+
+        assert!(matches!(
+            node.diagnostics.as_slice(),
+            [RenderDiagnostic::TextFrameCollapsed { .. }]
+        ));
+        assert_eq!(node.local_bounds.width, 0.0);
     }
 
     #[test]
