@@ -323,7 +323,11 @@ impl TextRenderer {
                 } else {
                     bounds.into()
                 },
-                control_bounds: frame.into(),
+                control_bounds: if descriptor.point_text {
+                    rendered_bounds
+                } else {
+                    frame.into()
+                },
                 post_script_fonts: fonts
                     .iter()
                     .map(|font| font.post_script_name().to_owned())
