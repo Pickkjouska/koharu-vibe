@@ -193,6 +193,11 @@
     "source": "原文",
     "style": "スタイル",
     "textColor": "文字色",
+    "textDiagnostics": {
+      "belowReadableSize": "フォントサイズが可読下限（{{minimum}}px）を下回っています。",
+      "collapsed": "テキストボックスが内側の余白より小さいため、拡大するまで文字が表示されません。",
+      "overflow": "テキストがボックスに収まっていません。"
+    },
     "textDirection": "文字方向",
     "translation": "翻訳",
     "type": "タイポグラフィ",

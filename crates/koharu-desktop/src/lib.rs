@@ -4,7 +4,7 @@ use std::{collections::HashSet, future::Future, sync::Arc};
 
 use anyhow::{Context as _, Result, bail};
 use koharu_rasterizer::{Rasterizer, ResourceId};
-use koharu_renderer::{Frame as RenderedFrame, LayerKind, Renderer};
+use koharu_renderer::{Frame as RenderedFrame, LayerKind, RenderDiagnostic, Renderer};
 use koharu_scene::{Commit, EntityId, Geometry, Point, Revision, Snapshot};
 use parking_lot::{Mutex as SyncMutex, RwLock};
 use serde::{Deserialize, Serialize};
@@ -44,6 +44,27 @@ pub struct CanvasState {
     pub generation: u64,
     pub size: [u32; 2],
     pub element_frames: Vec<TransformFrame>,
+    pub text_diagnostics: Vec<TextDiagnostic>,
+}
+
+/// Text problems the renderer detected for one layer on the presented page.
+///
+/// The editor shows these so a layer that cannot be laid out stops looking like a
+/// silent deletion.
+#[derive(Clone, Debug, PartialEq, Serialize, Type)]
+pub struct TextDiagnostic {
+    pub layer: EntityId,
+    pub kind: TextDiagnosticKind,
+    pub font_size: Option<f32>,
+    pub minimum_font_size: Option<f32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub enum TextDiagnosticKind {
+    Collapsed,
+    Overflow,
+    BelowReadableSize,
 }
 
 #[derive(Default)]
@@ -118,7 +139,9 @@ impl Desktop {
     }
 
     pub async fn prepare_page(&self, snapshot: &Snapshot, page: EntityId) -> Result<bool> {
-        let request = self.request_preparation();
+        // Cache work observes presentation ownership; it must not cancel the
+        // committed edit currently preparing the visible page.
+        let request = self.presentation.read().requested_preparation;
         let _preparation = self.preparation.lock().await;
         if !self.is_current_preparation(request) {
             return Ok(false);
@@ -195,6 +218,7 @@ impl Desktop {
                 generation: presentation.generation,
                 size: [0, 0],
                 element_frames: Vec::new(),
+                text_diagnostics: Vec::new(),
             };
         };
         let (width, height) = frame.size();
@@ -226,6 +250,7 @@ impl Desktop {
             generation: presentation.generation,
             size: [width, height],
             element_frames,
+            text_diagnostics: text_diagnostics(frame),
         }
     }
 
@@ -508,6 +533,48 @@ impl PageFrameCache {
     }
 }
 
+fn text_diagnostics(frame: &RenderedFrame) -> Vec<TextDiagnostic> {
+    let mut collapsed = HashSet::new();
+    for diagnostic in frame.diagnostics() {
+        if let RenderDiagnostic::TextFrameCollapsed { entity, .. } = diagnostic {
+            collapsed.insert(*entity);
+        }
+    }
+    frame
+        .diagnostics()
+        .iter()
+        .filter_map(|diagnostic| match diagnostic {
+            RenderDiagnostic::TextFrameCollapsed { entity, .. } => Some(TextDiagnostic {
+                layer: *entity,
+                kind: TextDiagnosticKind::Collapsed,
+                font_size: None,
+                minimum_font_size: None,
+            }),
+            // A collapsed frame already explains the overflow; reporting both only
+            // repeats the same visible problem.
+            RenderDiagnostic::TextOverflow { entity, .. } if !collapsed.contains(entity) => {
+                Some(TextDiagnostic {
+                    layer: *entity,
+                    kind: TextDiagnosticKind::Overflow,
+                    font_size: None,
+                    minimum_font_size: None,
+                })
+            }
+            RenderDiagnostic::TextBelowReadableSize {
+                entity,
+                font_size,
+                minimum_font_size,
+            } => Some(TextDiagnostic {
+                layer: *entity,
+                kind: TextDiagnosticKind::BelowReadableSize,
+                font_size: Some(*font_size),
+                minimum_font_size: Some(*minimum_font_size),
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
 fn frame_transform(original: Frame, preview: Frame) -> [f64; 6] {
     let original_angle = f64::from(original.angle_degrees).to_radians();
     let preview_angle = f64::from(preview.angle_degrees).to_radians();
@@ -542,11 +609,59 @@ fn transform_point([a, b, c, d, e, f]: [f64; 6], point: &Point) -> Point {
 
 #[cfg(test)]
 mod tests {
-    use std::{future::pending, sync::Arc, time::Duration};
+    use std::{
+        future::{Future, pending},
+        sync::Arc,
+        task::Poll,
+        time::Duration,
+    };
 
     use tokio::{sync::Notify, time::timeout};
 
     use super::Desktop;
+
+    #[tokio::test]
+    async fn page_prefetch_does_not_cancel_a_committed_presentation() {
+        use koharu_scene::{At, PageDraft, Session};
+        let mut session = Session::memory().await.unwrap();
+        let mut edit = session.snapshot().edit();
+        let page = edit
+            .add_page(PageDraft::new("active", 100.0, 100.0), At::End)
+            .unwrap();
+        let adjacent = edit
+            .add_page(PageDraft::new("adjacent", 100.0, 100.0), At::End)
+            .unwrap();
+        let base = session
+            .commit(edit.finish().unwrap())
+            .await
+            .unwrap()
+            .snapshot;
+        let desktop = Desktop::new().unwrap();
+        desktop.show_page(&base, Some(page)).await.unwrap();
+        let patch = base
+            .patch(|edit| edit.set_page(page, PageDraft::new("edited", 100.0, 100.0)))
+            .unwrap();
+        let commit = session.commit(patch).await.unwrap();
+
+        let held = desktop.preparation.lock().await;
+        let mut presentation = Box::pin(desktop.synchronize(&commit.snapshot, Some(page), &commit));
+        let mut prefetch = Box::pin(desktop.prepare_page(&base, adjacent));
+        std::future::poll_fn(|context| {
+            assert!(presentation.as_mut().poll(context).is_pending());
+            assert!(prefetch.as_mut().poll(context).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        drop(held);
+
+        assert!(
+            presentation.await.unwrap(),
+            "cache prefetch must not supersede a committed edit"
+        );
+        assert!(prefetch.await.unwrap());
+        assert_eq!(desktop.canvas_state().revision, Some(commit.revision));
+        assert_eq!(desktop.canvas_state().page, Some(page));
+    }
 
     #[tokio::test]
     async fn newer_request_preempts_current_preparation_and_acquires_ownership() {

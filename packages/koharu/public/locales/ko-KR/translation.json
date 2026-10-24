@@ -193,6 +193,11 @@
     "source": "원문",
     "style": "스타일",
     "textColor": "텍스트 색상",
+    "textDiagnostics": {
+      "belowReadableSize": "글꼴 크기가 가독 최소값({{minimum}}px)보다 작습니다.",
+      "collapsed": "텍스트 상자가 안쪽 여백보다 작아, 키워야 글자가 표시됩니다.",
+      "overflow": "텍스트가 상자에 맞지 않습니다."
+    },
     "textDirection": "텍스트 방향",
     "translation": "번역",
     "type": "타이포그래피",

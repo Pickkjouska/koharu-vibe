@@ -51,6 +51,10 @@ const DEFAULT_RETAINED_NODES: usize = 2_048;
 const MAX_RESOURCE_READS: usize = 8;
 const ASSETS_KIND: &str = "dev.koharu.assets";
 const MINIMUM_FONT_SIZE: f32 = 9.0;
+/// Aspect ratio a detected CJK box must clear before it switches to vertical text.
+/// A box that is nearly square would otherwise flip writing mode while the user
+/// drags an edge back and forth.
+const VERTICAL_AUTO_ASPECT: f32 = 1.25;
 
 #[derive(Clone)]
 pub struct Renderer {
@@ -1442,7 +1446,9 @@ fn resolve_writing_mode(
     match analysis.map(|value| value.direction) {
         Some(TextDirection::Vertical) => WritingMode::VerticalRl,
         Some(TextDirection::Horizontal) => WritingMode::Horizontal,
-        Some(TextDirection::Auto) | None if bounds.height > bounds.width => WritingMode::VerticalRl,
+        Some(TextDirection::Auto) | None if bounds.height > bounds.width * VERTICAL_AUTO_ASPECT => {
+            WritingMode::VerticalRl
+        }
         Some(TextDirection::Auto) | None => WritingMode::Horizontal,
     }
 }
@@ -2475,5 +2481,28 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("not contiguous"));
+    }
+
+    #[test]
+    fn detected_cjk_writing_mode_ignores_nearly_square_boxes() {
+        let text = "日本語のテキスト";
+        let mode = |width: f32, height: f32| {
+            resolve_writing_mode(
+                text,
+                LayoutBox {
+                    x: 0.0,
+                    y: 0.0,
+                    width,
+                    height,
+                },
+                None,
+                None,
+            )
+        };
+
+        assert_eq!(mode(100.0, 100.0), WritingMode::Horizontal);
+        assert_eq!(mode(100.0, 120.0), WritingMode::Horizontal);
+        assert_eq!(mode(100.0, 130.0), WritingMode::VerticalRl);
+        assert_eq!(mode(120.0, 100.0), WritingMode::Horizontal);
     }
 }

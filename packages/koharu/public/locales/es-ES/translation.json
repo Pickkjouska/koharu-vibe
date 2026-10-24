@@ -193,6 +193,11 @@
     "source": "Texto original",
     "style": "Estilo",
     "textColor": "Color del texto",
+    "textDiagnostics": {
+      "belowReadableSize": "El tamaño de fuente está por debajo del mínimo legible ({{minimum}}px).",
+      "collapsed": "El cuadro de texto es más pequeño que su margen interior; amplíalo para ver el texto.",
+      "overflow": "El texto no cabe en este cuadro."
+    },
     "textDirection": "Dirección del texto",
     "translation": "Traducción",
     "type": "Tipografía",

@@ -732,6 +732,21 @@ describe('greenfield editor', () => {
     )
   })
 
+  it('warns about text the renderer could not lay out', () => {
+    installProject()
+    useKoharuStore.setState({
+      tool: 'text',
+      textDiagnostics: {
+        element: [
+          { layer: 'element', kind: 'overflow', font_size: null, minimum_font_size: null },
+        ],
+      },
+    })
+    render(<Inspector />)
+
+    expect(screen.getByTestId('text-diagnostics')).toHaveTextContent('The text does not fit this box.')
+  })
+
   it('adjusts brush size from the toolbar popover', async () => {
     const user = userEvent.setup()
     installProject()
