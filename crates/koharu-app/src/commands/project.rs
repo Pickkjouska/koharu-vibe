@@ -860,6 +860,25 @@ impl Project {
         ))
     }
 
+    pub(crate) async fn rollback_commit(&mut self, commit: &Commit) -> Result<Commit> {
+        let snapshot = self.snapshot();
+        if snapshot.project_id() != commit.snapshot.project_id()
+            || snapshot.revision() != commit.revision
+        {
+            bail!("cannot roll back a commit from a different project or revision");
+        }
+        if self
+            .undo
+            .iter()
+            .any(|revisions| revisions.contains(&commit.revision))
+        {
+            bail!("cannot roll back a commit already recorded in edit history");
+        }
+        // Failed preparations are not user edits: preserve both history stacks,
+        // including redo entries that existed before this attempted transform.
+        Ok(self.session.undo(commit.revision).await?)
+    }
+
     pub(crate) async fn undo(&mut self) -> Result<Commit> {
         let revisions = self.undo.pop().ok_or_else(|| anyhow!("nothing to undo"))?;
         let commit = match self.session.undo_many(revisions.iter().copied()).await {
@@ -1363,6 +1382,78 @@ mod tests {
         assert_eq!(
             Project::typography_view(typography).writing_mode,
             Some(WritingMode::Vertical)
+        );
+    }
+
+    #[tokio::test]
+    async fn rollback_commit_preserves_undo_and_redo() {
+        let mut session = Session::memory().await.unwrap();
+        let mut setup = session.snapshot().edit();
+        let page = setup
+            .add_page(PageDraft::new("page", 100.0, 100.0), At::End)
+            .unwrap();
+        session.commit(setup.finish().unwrap()).await.unwrap();
+        let mut project = Project::new(session, "rollback".to_owned());
+        let first = project.rename_page(page, "first".to_owned()).await.unwrap();
+        project.record_commit(&first);
+        let second = project
+            .rename_page(page, "second".to_owned())
+            .await
+            .unwrap();
+        project.record_commit(&second);
+        project.undo().await.unwrap();
+        let before_undo = project.undo.clone();
+        let before_redo = project.redo.clone();
+
+        let failed = project
+            .rename_page(page, "failed".to_owned())
+            .await
+            .unwrap();
+        let rollback = project.rollback_commit(&failed).await.unwrap();
+        assert!(rollback.revision > failed.revision);
+        assert_eq!(
+            project.snapshot().page(page).unwrap().page().unwrap().label,
+            "first"
+        );
+        assert_eq!(project.undo, before_undo);
+        assert_eq!(project.redo, before_redo);
+        project.redo().await.unwrap();
+        assert_eq!(
+            project.snapshot().page(page).unwrap().page().unwrap().label,
+            "second"
+        );
+        project.undo().await.unwrap();
+        project.undo().await.unwrap();
+        assert_eq!(
+            project.snapshot().page(page).unwrap().page().unwrap().label,
+            "page"
+        );
+    }
+
+    #[tokio::test]
+    async fn rollback_commit_rejects_other_projects_and_newer_edits() {
+        let mut project = Project::new(Session::memory().await.unwrap(), "first".to_owned());
+        let mut setup = project.snapshot().edit();
+        let page = setup
+            .add_page(PageDraft::new("page", 100.0, 100.0), At::End)
+            .unwrap();
+        let commit = project.commit(setup.finish().unwrap()).await.unwrap();
+        let mut other = Project::new(Session::memory().await.unwrap(), "other".to_owned());
+        let mut setup = other.snapshot().edit();
+        setup
+            .add_page(PageDraft::new("other", 100.0, 100.0), At::End)
+            .unwrap();
+        other.commit(setup.finish().unwrap()).await.unwrap();
+        assert_eq!(project.revision(), other.revision());
+        assert!(other.rollback_commit(&commit).await.is_err());
+        project
+            .rename_page(page, "newer edit".to_owned())
+            .await
+            .unwrap();
+        assert!(project.rollback_commit(&commit).await.is_err());
+        assert_eq!(
+            project.snapshot().page(page).unwrap().page().unwrap().label,
+            "newer edit"
         );
     }
 

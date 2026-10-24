@@ -4,7 +4,7 @@ use anyhow::{Context as _, anyhow, bail};
 use image::{GrayImage, ImageEncoder as _, codecs::png::PngEncoder};
 use koharu_desktop::{CanvasState, Desktop, Frame, TransformFrame};
 use koharu_rasterizer::ResourceId;
-use koharu_scene::{EntityId, Revision};
+use koharu_scene::{Commit, EntityId, Revision};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -285,6 +285,28 @@ async fn commit_raster_stroke(
     })
 }
 
+// The caller holds the project lock. An older view request may supersede one
+// attempt, but it cannot own the final canvas revision of this transaction.
+async fn synchronize_transform(
+    desktop: &Desktop,
+    commit: &Commit,
+    page: Option<EntityId>,
+) -> anyhow::Result<()> {
+    let mut incremental = true;
+    loop {
+        if incremental {
+            desktop.synchronize(&commit.snapshot, page, commit).await?;
+        } else {
+            desktop.show_page(&commit.snapshot, page).await?;
+        }
+        let canvas = desktop.canvas_state();
+        if canvas.page == page && (page.is_none() || canvas.revision == Some(commit.revision)) {
+            return Ok(());
+        }
+        incremental = false;
+    }
+}
+
 #[tauri::command]
 #[specta::specta]
 pub(crate) async fn commit_transform(
@@ -298,40 +320,27 @@ pub(crate) async fn commit_transform(
     if geometries.is_empty() {
         return Ok(None);
     }
-    let (commit, page) = {
-        let mut project = project.project.lock().await;
-        let project = project.as_mut().context("no project is open")?;
-        ensure_revision(project.snapshot().revision(), expected_revision)?;
-        let commit = project.set_geometries(geometries).await?;
-        project.record_commit(&commit);
-        (commit, project.active_page())
-    };
-    if let Err(error) = desktop.synchronize(&commit.snapshot, page, &commit).await {
-        // The prepared frame cannot represent the new revision. Roll the edit back so
-        // the project and the canvas keep converging: a stale frame would reject every
-        // later transform against a revision the renderer will never reach.
-        let rollback = {
-            let mut guard = project.project.lock().await;
-            match guard.as_mut() {
-                Some(project) => Some(project.undo().await),
-                None => None,
-            }
-        };
-        match rollback {
-            Some(Ok(rolled_back)) => {
-                if let Err(error) = desktop
-                    .synchronize(&rolled_back.snapshot, page, &rolled_back)
-                    .await
-                {
+    // Keep the project stable until preparation succeeds or this exact commit is
+    // reverted. Another edit or project switch must not become the rollback target.
+    let mut guard = project.project.lock().await;
+    let project = guard.as_mut().context("no project is open")?;
+    ensure_revision(project.snapshot().revision(), expected_revision)?;
+    let commit = project.set_geometries(geometries).await?;
+    let page = project.active_page();
+    if let Err(error) = synchronize_transform(&desktop, &commit, page).await {
+        match project.rollback_commit(&commit).await {
+            Ok(rolled_back) => {
+                if let Err(error) = synchronize_transform(&desktop, &rolled_back, page).await {
                     tracing::error!(%error, "rolled-back transform could not be prepared");
                 }
                 canvas_channel.channel.publish(desktop.canvas_state());
             }
-            Some(Err(rollback)) => tracing::error!(%rollback, "transform rollback failed"),
-            None => tracing::error!("transform rollback had no open project"),
+            Err(rollback) => tracing::error!(%rollback, "transform rollback failed"),
         }
         return Err(error.into());
     }
+    project.record_commit(&commit);
+    drop(guard);
     canvas_channel.channel.publish(desktop.canvas_state());
     Ok(Some(commit.revision))
 }

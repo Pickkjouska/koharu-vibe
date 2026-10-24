@@ -139,7 +139,9 @@ impl Desktop {
     }
 
     pub async fn prepare_page(&self, snapshot: &Snapshot, page: EntityId) -> Result<bool> {
-        let request = self.request_preparation();
+        // Cache work observes presentation ownership; it must not cancel the
+        // committed edit currently preparing the visible page.
+        let request = self.presentation.read().requested_preparation;
         let _preparation = self.preparation.lock().await;
         if !self.is_current_preparation(request) {
             return Ok(false);
@@ -607,11 +609,59 @@ fn transform_point([a, b, c, d, e, f]: [f64; 6], point: &Point) -> Point {
 
 #[cfg(test)]
 mod tests {
-    use std::{future::pending, sync::Arc, time::Duration};
+    use std::{
+        future::{Future, pending},
+        sync::Arc,
+        task::Poll,
+        time::Duration,
+    };
 
     use tokio::{sync::Notify, time::timeout};
 
     use super::Desktop;
+
+    #[tokio::test]
+    async fn page_prefetch_does_not_cancel_a_committed_presentation() {
+        use koharu_scene::{At, PageDraft, Session};
+        let mut session = Session::memory().await.unwrap();
+        let mut edit = session.snapshot().edit();
+        let page = edit
+            .add_page(PageDraft::new("active", 100.0, 100.0), At::End)
+            .unwrap();
+        let adjacent = edit
+            .add_page(PageDraft::new("adjacent", 100.0, 100.0), At::End)
+            .unwrap();
+        let base = session
+            .commit(edit.finish().unwrap())
+            .await
+            .unwrap()
+            .snapshot;
+        let desktop = Desktop::new().unwrap();
+        desktop.show_page(&base, Some(page)).await.unwrap();
+        let patch = base
+            .patch(|edit| edit.set_page(page, PageDraft::new("edited", 100.0, 100.0)))
+            .unwrap();
+        let commit = session.commit(patch).await.unwrap();
+
+        let held = desktop.preparation.lock().await;
+        let mut presentation = Box::pin(desktop.synchronize(&commit.snapshot, Some(page), &commit));
+        let mut prefetch = Box::pin(desktop.prepare_page(&base, adjacent));
+        std::future::poll_fn(|context| {
+            assert!(presentation.as_mut().poll(context).is_pending());
+            assert!(prefetch.as_mut().poll(context).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        drop(held);
+
+        assert!(
+            presentation.await.unwrap(),
+            "cache prefetch must not supersede a committed edit"
+        );
+        assert!(prefetch.await.unwrap());
+        assert_eq!(desktop.canvas_state().revision, Some(commit.revision));
+        assert_eq!(desktop.canvas_state().page, Some(page));
+    }
 
     #[tokio::test]
     async fn newer_request_preempts_current_preparation_and_acquires_ownership() {
